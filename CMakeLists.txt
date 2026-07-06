@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(fast_livo)
+project(fast_livo2)
 
 set(CMAKE_BUILD_TYPE "Release")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
@@ -89,14 +89,18 @@ find_package(catkin REQUIRED COMPONENTS
   eigen_conversions
   vikit_common
   vikit_ros
-  cv_bridge
+  cv_bridge4
   image_transport
 )
 
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(Sophus REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io features search kdtree)
+find_package(OpenCV 4 REQUIRED)
+message(WARNING ${OpenCV_INCLUDE_DIRS})
+message(WARNING ${OpenCV_LIBRARIES})
+# find_package(Sophus REQUIRED)
+set(Sophus_INCLUDE_DIRS /usr/local/include)
+set(Sophus_LIBRARIES /usr/local/lib/libSophus.so)
 find_package(Boost REQUIRED COMPONENTS thread)
 
 set(Sophus_LIBRARIES libSophus.so)
@@ -104,7 +108,7 @@ set(Sophus_LIBRARIES libSophus.so)
 # Define the catkin package
 catkin_package(
   CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime cv_bridge vikit_common vikit_ros image_transport
-  DEPENDS EIGEN3 PCL OpenCV Sophus
+  DEPENDS
 )
 
 # Include directories for dependencies
@@ -118,22 +122,52 @@ include_directories(
 )
 
 # Add libraries
-add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-add_library(lio src/voxel_map.cpp)
-add_library(pre src/preprocess.cpp)
-add_library(imu_proc src/IMU_Processing.cpp)
-add_library(laser_mapping src/LIVMapper.cpp)
+add_library(vio2 src/vio.cpp src/frame.cpp src/visual_point.cpp)
+target_link_libraries(vio2
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES})
+add_library(lio2 src/voxel_map.cpp)
+target_link_libraries(lio2
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES})
+add_library(pre2 src/preprocess.cpp)
+target_link_libraries(pre2
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES})
+add_library(imu_proc2 src/IMU_Processing.cpp)
+target_link_libraries(imu_proc2
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES})
+add_library(laser_mapping2 src/LIVMapper.cpp)
+target_link_libraries(laser_mapping2
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES})
 
 # Add the main executable
-add_executable(fastlivo_mapping src/main.cpp)
+add_executable(fastlivo_mapping2 src/main.cpp)
 
 # Link libraries to the executable
-target_link_libraries(fastlivo_mapping
-  laser_mapping
-  vio
-  lio
-  pre
-  imu_proc
+target_link_libraries(fastlivo_mapping2
+  laser_mapping2
+  vio2
+  lio2
+  pre2
+  imu_proc2
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
@@ -143,5 +177,5 @@ target_link_libraries(fastlivo_mapping
 
 # Link mimalloc if found
 if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping mimalloc)
+  target_link_libraries(fastlivo_mapping2 mimalloc)
 endif()
