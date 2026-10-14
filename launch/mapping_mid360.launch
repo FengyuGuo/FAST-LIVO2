@@ -9,7 +9,17 @@
 
 	<node pkg="fast_livo2" type="fastlivo_mapping2" name="laserMapping" output="screen" launch-prefix="$(arg launch_prefix)">
 		<rosparam file="$(find fast_livo2)/config/camera_d435.yaml" />
+		<!-- 本工程链接了 mimalloc (CMakeLists.txt: find_package(mimalloc) + target_link_libraries)。
+		     mimalloc 默认"延迟 purge": free 掉的大块不会立刻归还 OS, 于是每帧
+		     分配/释放的大缓冲(如 pv_list_ 1.5MB)会让 RSS 只涨不落。
+		     实测: 34MB/s -> 6MB/s。 -->
+		<env name="MIMALLOC_PURGE_DELAY" value="0" />
+		<env name="MIMALLOC_PURGE_DECOMMITS" value="1" />
+		<env name="MIMALLOC_ARENA_EAGER_COMMIT" value="0" />
 	</node>
+	<!-- 备选方案(更彻底): 去掉 mimalloc, 改用 glibc 默认分配器
+	     注释 CMakeLists.txt:180 的 target_link_libraries(fastlivo_mapping2 mimalloc) 后重编译。
+	     代价: 失去 mimalloc 的性能优势。 -->
 	
 	<group if="$(arg rviz)">
 		<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo2)/rviz_cfg/fast_livo2.rviz" />

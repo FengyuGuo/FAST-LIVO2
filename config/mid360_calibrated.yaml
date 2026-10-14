@@ -63,9 +63,19 @@ lio:
   layer_init_num: [5, 5, 5, 5, 5]
 
 local_map:  
-  map_sliding_en: false
+  map_sliding_en: true
   half_map_size: 100
   sliding_thresh: 8
+  # --- 视觉地图滑窗: 防止 feat_map(及其钉住的图像) 无上限增长 ---
+  # 与 LiDAR 滑窗同规则: 位移超过 visual_map_sliding_thresh 才裁剪一次,
+  # 保留当前位姿周围 visual_map_half_size 个 0.5m 体素。
+  visual_map_sliding_en: true
+  visual_map_half_size: 100
+  visual_map_sliding_thresh: 8
+
+debug:
+  mem_monitor_en: false   # 需要排查内存时改成 true, 会每 5 帧打印一行 [MEM]
+  malloc_trim_en: true    # 周期性把空闲堆还给 OS(默认开)
 
 uav:
   imu_rate_odom: false
@@ -83,7 +93,7 @@ evo:
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: true
+  pcd_save_en: false
   type: 0 # 0: World Frame, 1: Body Frame;
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.15

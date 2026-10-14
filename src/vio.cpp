@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <cstdlib>
 
 VIOManager::VIOManager()
 {
@@ -156,6 +157,9 @@ void VIOManager::initializeVIO()
   retrieve_voxel_points.reserve(length);
   append_voxel_points.reserve(length);
 
+  // 深度图缓冲一次性分配，之后每帧只清零复用(原来每帧 Mat::zeros 分配 1.23MB)
+  depth_img_ = cv::Mat::zeros(height, width, CV_32FC1);
+
   sub_feat_map.clear();
 }
 
@@ -249,8 +253,54 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   }
 }
 
-void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
-                                                  const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
+// 视觉地图滑窗: 把离当前位置超过 visual_map_half_size (0.5m 体素) 的体素整块删掉。
+// VOXEL_POINTS 的析构会 delete 其中所有 VisualPoint，VisualPoint 的析构会 delete
+// 其 obs_ 里的 Feature；Feature 的析构会 delete[] patch_。因此这里 delete 即整链释放。
+// 必须在 processFrame 的所有 visual_submap 使用之后调用(否则会留下悬垂指针)。
+size_t VIOManager::visual_map_prune()
+{
+  if (!visual_map_sliding_en) return 0;
+  if (visual_map_half_size <= 0) return 0;
+  if (feat_map.empty()) return 0;
+
+  const V3D cur_pos = new_frame_ ? new_frame_->pos() : V3D(0, 0, 0);
+  if ((cur_pos - last_visual_slide_position).norm() < visual_map_sliding_thresh) return 0;
+  last_visual_slide_position = cur_pos;
+
+  const double voxel_size = 0.5;
+  float loc_xyz[3];
+  for (int j = 0; j < 3; j++)
+  {
+    loc_xyz[j] = cur_pos[j] / voxel_size;
+    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+  }
+  const int64_t cx = (int64_t)loc_xyz[0];
+  const int64_t cy = (int64_t)loc_xyz[1];
+  const int64_t cz = (int64_t)loc_xyz[2];
+  const int64_t h = static_cast<int64_t>(visual_map_half_size);
+
+  size_t removed = 0;
+  for (auto it = feat_map.begin(); it != feat_map.end();)
+  {
+    const VOXEL_LOCATION &loc = it->first;
+    const bool outside = (loc.x > cx + h) || (loc.x < cx - h) ||
+                         (loc.y > cy + h) || (loc.y < cy - h) ||
+                         (loc.z > cz + h) || (loc.z < cz - h);
+    if (outside)
+    {
+      delete it->second;
+      it = feat_map.erase(it);
+      ++removed;
+    }
+    else
+    {
+      ++it;
+    }
+  }
+  return removed;
+}
+
+void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,                                                  const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
 {
   // create homography matrix
   const V3D t = T_cur_ref.inverse().translation();
@@ -366,10 +416,23 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   float voxel_size = 0.5;
 
-  if (!normal_en) warp_map.clear();
+  if (!normal_en)
+  {
+    // NOTE: clear() 只清空表、不析构 value，Warp* 会泄漏；必须先显式 delete
+    for (auto &kv : warp_map) delete kv.second;
+    warp_map.clear();
+  }
 
-  cv::Mat depth_img = cv::Mat::zeros(height, width, CV_32FC1);
-  float *it = (float *)depth_img.data;
+  // 复用成员深度图缓冲: 只清零不重新分配(原来是每帧 Mat::zeros，640x480x4=1.23MB/帧)
+  if (depth_img_.rows != height || depth_img_.cols != width || depth_img_.type() != CV_32FC1)
+  {
+    depth_img_ = cv::Mat::zeros(height, width, CV_32FC1);
+  }
+  else
+  {
+    depth_img_.setTo(0.f);
+  }
+  float *it = (float *)depth_img_.data;
 
   // float it[height * width] = {0.0};
 
@@ -923,10 +986,10 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
 
     V2D pc(new_frame_->w2c(pt->pos_));
     bool add_flag = false;
-    
-    float *patch_temp = new float[patch_size_total];
-    getImagePatch(img, pc, patch_temp, 0);
-    // TODO: condition: distance and view_angle
+
+    // NOTE: patch 只在确实要新增观测时分配(见下面 add_flag 分支)。
+    //       原实现在这里无条件 new float[patch_size_total]，而 add_flag==false 时
+    //       该指针既不交给 Feature 也不 delete —— 每个 VIO 帧、每个未新增的点都泄漏一次。
     // Step 1: time
     Feature *last_feature = pt->obs_.back();
     // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
@@ -955,6 +1018,8 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     {
       update_num += 1;
       update_flag[i] = 1;
+      float *patch_temp = new float[patch_size_total]; // 所有权移交给 ftr_new(~Feature 会 delete[])
+      getImagePatch(img, pc, patch_temp, 0);
       Vector3d f = cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
       ftr_new->img_ = img;
@@ -1790,8 +1855,11 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
     cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
   }
-  img_rgb = img.clone();
-  img_cp = img.clone();
+  // 复用缓冲，避免每帧分配两块 3通道图像(640x480x3 = 921KB x2)
+  if (img_rgb.size() != img.size() || img_rgb.type() != img.type()) img_rgb.create(img.size(), img.type());
+  img.copyTo(img_rgb);
+  if (img_cp.size() != img.size() || img_cp.type() != img.type()) img_cp.create(img.size(), img.type());
+  img.copyTo(img_cp);
   // img_test = img.clone();
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
@@ -1800,6 +1868,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   updateFrameState(*state);
   
   resetGrid();
+
+  // debug: VIO_STAGE_LIMIT=0 时只做取帧/clone/建 Frame，跳过后续全部 VIO 计算
+  static const int vio_stage_limit = getenv("VIO_STAGE_LIMIT") ? atoi(getenv("VIO_STAGE_LIMIT")) : 99;
+  if (vio_stage_limit <= 0) return;
 
   double t1 = omp_get_wtime();
 
@@ -1828,7 +1900,14 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   updateReferencePatch(feat_map);
 
   double t7 = omp_get_wtime();
-  
+
+  // 视觉地图滑窗: 必须在所有 visual_submap 使用之后执行
+  if (visual_map_sliding_en)
+  {
+    size_t pruned = visual_map_prune();
+    if (pruned > 0) printf("[ VIO ] Visual map sliding: removed %zu voxels, %zu left\n", pruned, feat_map.size());
+  }
+
   if(colmap_output_en)  dumpDataForColmap();
 
   frame_count++;

@@ -30,6 +30,16 @@ public:
   void initializeComponents();
   void initializeFiles();
   void run();
+  void printMemoryUsage(bool deep = false);   // debug: memory instrumentation
+  int mem_dbg_cnt = 0;                        // debug: memory instrumentation
+  bool mem_monitor_en = false;                // debug: 是否打印 [MEM] 探针
+  bool mem_trim_en = true;                    // 周期性 malloc_trim, 把空闲堆还给 OS
+  int mem_trim_cnt = 0;
+
+  // 视觉地图滑窗(由 local_map/* 配置读取, 见 readParameters)
+  bool visual_map_sliding_en = false;
+  int visual_map_half_size = 0;
+  double visual_map_sliding_thresh = 8.0;
   void gravityAlignment();
   void handleFirstFrame();
   void stateEstimationAndMapping();

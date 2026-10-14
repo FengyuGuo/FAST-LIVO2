@@ -359,8 +359,17 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     cross_mat_list_.push_back(point_crossmat);
   }
 
-  vector<pointWithVar>().swap(pv_list_);
-  pv_list_.resize(feats_down_size_);
+  // 原实现每个 LiDAR 帧都执行:
+  //     vector<pointWithVar>().swap(pv_list_);   // 连容量一起丢掉
+  //     pv_list_.resize(feats_down_size_);       // 重新分配 feats_down_size_*384B
+  // feats_down_size_ 典型 ~4000 => 每帧新分配/释放 ~1.5MB。
+  // 本工程链接了 mimalloc (CMakeLists.txt 里 find_package(mimalloc)),
+  // mimalloc 不会把释放的段还给 OS, 于是堆只涨不落 —— 实测 RSS ~34MB/s 增长的主因。
+  // 改成仅在容量不足时扩容, 复用已有缓冲(零分配稳态)。
+  if (pv_list_.size() != static_cast<size_t>(feats_down_size_))
+  {
+    pv_list_.resize(feats_down_size_);
+  }
 
   int rematch_num = 0;
   MD(DIM_STATE, DIM_STATE) G, H_T_H, I_STATE;

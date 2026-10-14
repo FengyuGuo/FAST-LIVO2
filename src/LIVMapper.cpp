@@ -11,6 +11,9 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <cstdlib>
+#include <fstream>
+#include <malloc.h>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -113,6 +116,13 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
 
+  // 视觉地图滑窗 + 内存探针
+  nh.param<bool>("local_map/visual_map_sliding_en", visual_map_sliding_en, false);
+  nh.param<int>("local_map/visual_map_half_size", visual_map_half_size, 0);
+  nh.param<double>("local_map/visual_map_sliding_thresh", visual_map_sliding_thresh, 8.0);
+  nh.param<bool>("debug/mem_monitor_en", mem_monitor_en, false);
+  nh.param<bool>("debug/malloc_trim_en", mem_trim_en, true);
+
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
 
@@ -130,6 +140,9 @@ void LIVMapper::initializeComponents()
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
   vio_manager->outlier_threshold = outlier_threshold;
+  vio_manager->visual_map_sliding_en = visual_map_sliding_en;
+  vio_manager->visual_map_half_size = visual_map_half_size;
+  vio_manager->visual_map_sliding_thresh = visual_map_sliding_thresh;
   vio_manager->setImuToLidarExtrinsic(extT, extR);
   vio_manager->setLidarToCameraExtrinsic(cameraextrinR, cameraextrinT);
   vio_manager->state = &_state;
@@ -549,9 +562,104 @@ void LIVMapper::run()
     // if (!p_imu->imu_time_init) continue;
 
     stateEstimationAndMapping();
+
+    // ==== debug: 内存探针（受 debug/mem_monitor_en 控制） ====
+    if (mem_monitor_en && ++mem_dbg_cnt % 5 == 0) printMemoryUsage(mem_dbg_cnt % 25 == 0);
+
+    // 周期性把已 free 的堆内存还给 OS。glibc 默认只在堆顶回收，
+    // 大量"每帧分配/释放的大缓冲"会把 heap 越顶越高导致 RSS 只涨不落。
+    if (mem_trim_en && ++mem_trim_cnt % 50 == 0) malloc_trim(0);
   }
   savePCD();
 }
+
+// ===================== debug: 内存探针实现 =====================
+namespace
+{
+
+struct OctoStat
+{
+  size_t nodes = 0;
+  size_t temp_points = 0;
+};
+
+void walkOctoTree(const VoxelOctoTree *n, OctoStat &st)
+{
+  if (n == nullptr) return;
+  st.nodes += 1;
+  st.temp_points += n->temp_points_.size();
+  for (int i = 0; i < 8; i++) walkOctoTree(n->leaves_[i], st);
+}
+
+long readProcStatusKb(const char *key)
+{
+  std::ifstream f("/proc/self/status");
+  std::string line;
+  const size_t kl = std::string(key).size();
+  while (std::getline(f, line))
+  {
+    if (line.compare(0, kl, key) == 0) return std::atol(line.c_str() + kl);
+  }
+  return -1;
+}
+
+} // namespace
+
+void LIVMapper::printMemoryUsage(bool deep)
+{
+  const long rss_mb = readProcStatusKb("VmRSS:") / 1024;
+  const long hwm_mb = readProcStatusKb("VmHWM:") / 1024;
+  const long data_mb = readProcStatusKb("VmData:") / 1024;
+
+  const std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &lmap =
+      voxelmap_manager ? voxelmap_manager->voxel_map_ : voxel_map;
+  const size_t lidar_roots = lmap.size();
+  size_t octo_nodes = 0, octo_points = 0;
+  if (deep)
+  {
+    OctoStat st;
+    for (const auto &kv : lmap) walkOctoTree(kv.second, st);
+    octo_nodes = st.nodes;
+    octo_points = st.temp_points;
+  }
+  const double lidar_est_mb =
+      (octo_nodes * (sizeof(VoxelOctoTree) + sizeof(VoxelPlane)) + octo_points * sizeof(pointWithVar)) / 1048576.0;
+
+  size_t visual_voxels = 0, visual_pts = 0, visual_feats = 0;
+  if (vio_manager)
+  {
+    visual_voxels = vio_manager->feat_map.size();
+    for (const auto &kv : vio_manager->feat_map)
+    {
+      if (kv.second == nullptr) continue;
+      visual_pts += kv.second->voxel_points.size();
+      for (const VisualPoint *vp : kv.second->voxel_points)
+      {
+        if (vp != nullptr) visual_feats += vp->obs_.size();
+      }
+    }
+  }
+
+  printf("\033[1;35m[MEM] RSS=%ldMB HWM=%ldMB VmData=%ldMB"
+         " || lidarMap roots=%zu octoNodes=%zu tempPts=%zu est=%.1fMB"
+         " || visualMap voxels=%zu pts=%zu feats=%zu"
+         " || warp=%zu"
+         " || clouds waitPub=%zu wWaitPub=%zu waitSave=%zu/%zu"
+         " || path=%zu measures=%zu"
+         " || bufs imu=%zu lid=%zu img=%zu prop=%zu"
+         " || sizeof spv=%zu VoxelPlane=%zu OctoTree=%zu\033[0m\n",
+         rss_mb, hwm_mb, data_mb,
+         lidar_roots, octo_nodes, octo_points, lidar_est_mb,
+         visual_voxels, visual_pts, visual_feats,
+         vio_manager ? vio_manager->warp_map.size() : 0,
+         pcl_wait_pub->points.size(), pcl_w_wait_pub->points.size(),
+         pcl_wait_save->points.size(), pcl_wait_save_intensity->points.size(),
+         path.poses.size(), LidarMeasures.measures.size(),
+         imu_buffer.size(), lid_raw_data_buffer.size(), img_buffer.size(), prop_imu_buffer.size(),
+         sizeof(pointWithVar), sizeof(VoxelPlane), sizeof(VoxelOctoTree));
+  fflush(stdout);
+}
+// =================== end debug: 内存探针 ===================
 
 void LIVMapper::prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr)
 {
@@ -869,6 +977,8 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
   cv::Mat img_cur = getImageFromMsg(msg);
   img_buffer.push_back(img_cur);
+  // 防止处理速度跟不上采集时 img_buffer 无界增长(每张 bgr8 640x480 = 921KB)
+  while (img_buffer.size() > 30) img_buffer.pop_front();
   img_time_buffer.push_back(img_time_correct);
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
@@ -1367,5 +1477,8 @@ void LIVMapper::publish_path(const ros::Publisher pubPath)
   msg_body_pose.header.stamp = ros::Time::now();
   msg_body_pose.header.frame_id = "camera_init";
   path.poses.push_back(msg_body_pose);
+  // 防止长航时下 path.poses 无上限增长(且每帧还会整条重发)
+  const size_t MAX_PATH_POSES = 20000;
+  if (path.poses.size() > MAX_PATH_POSES) path.poses.erase(path.poses.begin());
   pubPath.publish(path);
 }

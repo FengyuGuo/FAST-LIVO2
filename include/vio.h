@@ -130,6 +130,7 @@ public:
   vector<pointWithVar> append_voxel_points;
   FramePtr new_frame_;
   cv::Mat img_cp, img_rgb, img_test;
+  cv::Mat depth_img_; // 复用的深度图缓冲(640x480 CV_32FC1 = 1.23MB)，避免每帧重新分配
 
   enum CellType
   {
@@ -161,6 +162,12 @@ public:
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
+  // ---- 视觉地图滑窗: 按距离裁剪 feat_map，防止视觉地图(及其钉住的图像)无上限增长 ----
+  bool visual_map_sliding_en = false;
+  double visual_map_sliding_thresh = 8.0; // 位移超过该值才执行一次裁剪(m)
+  int visual_map_half_size = 0;           // 以 0.5m 体素计的半边长; <=0 表示不裁剪
+  V3D last_visual_slide_position = V3D(0, 0, 0);
+  size_t visual_map_prune();
   void plotTrackedPoints();
   void updateFrameState(StatesGroup state);
   void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
