@@ -2,19 +2,21 @@
 <!-- Launch file for Livox AVIA LiDAR -->
 
 	<arg name="rviz" default="true" />
+	<!-- 调试前缀: 默认为空(正常运行); 需要挂 gdb/valgrind 时在命令行覆盖 -->
+	<arg name="launch_prefix" default="" />
 
-	<rosparam command="load" file="$(find fast_livo2)/config/mid360.yaml" />
+	<rosparam command="load" file="$(find fast_livo2)/config/mid360_calibrated.yaml" />
 
-	<node pkg="fast_livo2" type="fastlivo_mapping2" name="laserMapping" output="screen">
-		<rosparam file="$(find fast_livo2)/config/camera_mynteye.yaml" />
+	<node pkg="fast_livo2" type="fastlivo_mapping2" name="laserMapping" output="screen" launch-prefix="$(arg launch_prefix)">
+		<rosparam file="$(find fast_livo2)/config/camera_d435.yaml" />
 	</node>
 	
 	<group if="$(arg rviz)">
 		<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo2)/rviz_cfg/fast_livo2.rviz" />
 	</group>
 	
-	<node pkg="image_transport" type="republish" name="republish" args="compressed in:=/mynteye/left/image_raw raw out:=/mynteye/left/image_raw" output="screen" respawn="true"/>
+	<node pkg="image_transport" type="republish" name="republish" args="compressed in:=/camera/infra1/image_rect_raw raw out:=/camera/infra1/image_rect_raw" output="screen" respawn="true"/>
 
-launch-prefix="gdb -ex run --args"
-launch-prefix="valgrind --leak-check=full"
+	<!-- 调试说明: laserMapping 使用了 launch-prefix="$(arg launch_prefix)", 默认空; -->
+	<!-- 需要挂 gdb/valgrind 时, 直接用 scripts/run_mid360_debug.sh 或在命令行覆盖该 arg. -->
 </launch> 	
