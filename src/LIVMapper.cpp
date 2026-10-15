@@ -11,9 +11,13 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <malloc.h>
+#include <sys/stat.h>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -200,6 +204,37 @@ void LIVMapper::initializeFiles()
   if(img_save_en) fout_visual_pos.open(std::string(ROOT_DIR) + "Log/image/image_poses.txt", std::ios::out);
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
   fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
+
+  if (pose_output_en)
+  {
+    const std::string result_dir = std::string(ROOT_DIR) + "Log/result/";
+    if (mkdir(result_dir.c_str(), 0775) != 0 && errno != EEXIST)
+    {
+      ROS_ERROR_STREAM("Cannot create state output directory " << result_dir << ": " << std::strerror(errno));
+      pose_output_en = false;
+      return;
+    }
+
+    const std::string pose_file = result_dir + seq_name + ".txt";
+    const std::string state_file = result_dir + seq_name + "_state.txt";
+    fout_evo.open(pose_file, std::ios::out);
+    fout_state.open(state_file, std::ios::out);
+    if (!fout_evo.is_open() || !fout_state.is_open())
+    {
+      ROS_ERROR_STREAM("Cannot open state output files: " << pose_file << " and " << state_file);
+      fout_evo.close();
+      fout_state.close();
+      pose_output_en = false;
+      return;
+    }
+
+    fout_evo << std::fixed << std::setprecision(9);
+    fout_state << std::fixed << std::setprecision(9);
+    fout_state << "# timestamp tx ty tz qx qy qz qw vx vy vz bgx bgy bgz bax bay baz\n"
+               << "# time: s; position: m (world); orientation: IMU/body to world; velocity: m/s (world); "
+                  "gyro bias: rad/s (IMU); accel bias: m/s^2 (IMU)" << std::endl;
+    ROS_INFO_STREAM("Saving LIO poses to " << pose_file << " and states to " << state_file);
+  }
 }
 
 void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it) 
@@ -394,28 +429,7 @@ void LIVMapper::handleLIO()
     state_update_flg = true;
   }
 
-  if (pose_output_en) 
-  {
-    static bool pos_opend = false;
-    static int ocount = 0;
-    std::ofstream outFile, evoFile;
-    if (!pos_opend) 
-    {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
-      pos_opend = true;
-      if (!evoFile.is_open()) ROS_ERROR("open fail\n");
-    } 
-    else 
-    {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
-      if (!evoFile.is_open()) ROS_ERROR("open fail\n");
-    }
-    Eigen::Matrix4d outT;
-    Eigen::Quaterniond q(_state.rot_end);
-    evoFile << std::fixed;
-    evoFile << LidarMeasures.last_lio_update_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
-            << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
-  }
+  saveStateResults();
   
   euler_cur = RotMtoEuler(_state.rot_end);
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
@@ -492,6 +506,24 @@ void LIVMapper::handleLIO()
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+}
+
+void LIVMapper::saveStateResults()
+{
+  if (!pose_output_en) return;
+
+  // Log the corrected state after each successful LIO/LO update, before VIO.
+  const double timestamp = LidarMeasures.last_lio_update_time;
+  const Eigen::Quaterniond q(_state.rot_end);
+  fout_evo << timestamp << " " << _state.pos_end.transpose() << " "
+           << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+  fout_state << timestamp << " " << _state.pos_end.transpose() << " "
+             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " "
+             << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+             << _state.bias_a.transpose() << std::endl;
+
+  if (!fout_evo.good() || !fout_state.good())
+    ROS_ERROR_THROTTLE(5.0, "Failed to write pose/state results; check output files and disk space.");
 }
 
 void LIVMapper::savePCD() 

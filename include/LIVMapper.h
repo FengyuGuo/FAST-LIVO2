@@ -45,6 +45,7 @@ public:
   void stateEstimationAndMapping();
   void handleVIO();
   void handleLIO();
+  void saveStateResults();
   void savePCD();
   void processImu();
   
@@ -150,6 +151,7 @@ public:
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
   ofstream fout_pre, fout_out, fout_visual_pos, fout_lidar_pos, fout_points;
+  ofstream fout_evo, fout_state;
 
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
 

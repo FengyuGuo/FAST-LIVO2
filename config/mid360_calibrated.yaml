@@ -89,8 +89,8 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "CBD_Building_01"
-  pose_output_en: false
+  seq_name: "office_dog"
+  pose_output_en: true # Save TUM poses and pose/velocity/IMU biases in Log/result/.
 
 pcd_save:
   pcd_save_en: false
