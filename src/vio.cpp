@@ -12,6 +12,11 @@ which is included as part of this source code package.
 
 #include "vio.h"
 #include <cstdlib>
+#include <atomic>
+
+// 诊断用: 因重投影出界而被跳过的点数(累计)。
+// 该值持续增长 => 边界检查确实在生效, 即原来的越界读真实存在。
+static std::atomic<long> g_oob_skipped(0);
 
 VIOManager::VIOManager()
 {
@@ -401,7 +406,18 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
 
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  if (feat_map.size() <= 0) return;
+  if (feat_map.size() <= 0)
+  {
+    // 【必须】一并复位 submap / total_points。
+    // 否则 feat_map 变空时(例如视觉地图滑窗 visual_map_prune() 把点全裁掉),
+    // visual_submap->voxel_points 会残留上一帧的 VisualPoint*, 而 total_points 仍是旧值;
+    // 下一次 updateState 就会按旧 total_points 迭代并解引用已被 delete 的指针,
+    // 用野指针算出的 img_ptr 去读图像 => 越界读 => SIGSEGV。
+    visual_submap->reset();
+    resetGrid();
+    total_points = 0;
+    return;
+  }
   double ts0 = omp_get_wtime();
 
   // pg_down->reserve(feat_map.size());
@@ -1511,6 +1527,15 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       V3D pf = Rcw * pt->pos_ + Pcw;
       pc = cam->world2cam(pf);
 
+      // 【必须】重做边界检查。pf/pc 是用"本轮迭代刚更新过的位姿"重投影得到的,
+      // 而 total_points/visual_submap 是上一帧用旧位姿筛出来的; 位姿一变点就可能
+      // 跑出图像。下面像素访问的盒子是 [v_ref_i-5*scale, v_ref_i+5*scale] x
+      // [u_ref_i-5*scale, u_ref_i+5*scale], 而 u_ref_i/v_ref_i > u_ref/v_ref - scale,
+      // 所以需留 6*scale 余量, 否则越界读 img.data
+      // (core dump 实证: SEGV_MAPERR, 越界 32 字节, 崩在 updateState 的 OMP worker)。
+      if (pf[2] <= 0.1f) { ++g_oob_skipped; continue; }
+      if (!cam->isInFrame(pc.cast<int>(), (patch_size_half + 2) * scale)) { ++g_oob_skipped; continue; }
+
       const float u_ref = pc[0];
       const float v_ref = pc[1];
       const int u_ref_i = floorf(pc[0] / scale) * scale;
@@ -1635,8 +1660,12 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       if (pt == nullptr) continue;
 
+      // 【必须】重做边界检查, 理由同 updateStateInverse。
+      // 访问盒 [v_ref_i-5s, v_ref_i+5s] x [u_ref_i-5s, u_ref_i+5s], 需 6*scale 余量。
       V3D pf = Rcw * pt->pos_ + Pcw;
+      if (pf[2] <= 0.1f) { ++g_oob_skipped; continue; }
       V2D pc = cam->world2cam(pf);
+      if (!cam->isInFrame(pc.cast<int>(), (patch_size_half + 2) * scale)) { ++g_oob_skipped; continue; }
 
       computeProjectionJacobian(pf, Jdpi);
       M3D p_hat;
@@ -1931,6 +1960,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+  if (g_oob_skipped.load() > 0)
+  {
+    printf("\033[1;33m| %-29s | %-27ld |\033[0m\n", "OOB skipped (cumulative)", g_oob_skipped.load());
+  }
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
